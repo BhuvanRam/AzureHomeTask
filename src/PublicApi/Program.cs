@@ -30,17 +30,20 @@ using MinimalApi.Endpoint.Extensions;
 var builder = WebApplication.CreateBuilder(args);
 
 /* BEGIN : Modified as part of EPAM CloudX Associate Final Task */
+
 ConfigurationManager configuration = builder.Configuration;
 builder.Services.AddDbContext<CatalogContext>(c =>
 {
-    string catalogConnectionString = configuration.GetConnectionString("CatalogConnection");
-    c.UseSqlServer(catalogConnectionString);
+    //string catalogConnectionString = configuration.GetConnectionString("CatalogConnection");
+    //c.UseSqlServer(catalogConnectionString);
+    c.UseInMemoryDatabase("Microsoft.eShopOnWeb.CatalogDb");
 });
 
 builder.Services.AddDbContext<AppIdentityDbContext>(c =>
 {
-    string catalogConnectionString = configuration.GetConnectionString("IdentityConnection");
-    c.UseSqlServer(catalogConnectionString);
+    //string catalogConnectionString = configuration.GetConnectionString("IdentityConnection");
+    //c.UseSqlServer(catalogConnectionString);
+    c.UseInMemoryDatabase("Microsoft.eShopOnWeb.Identity");
 });
 /* END : Modified as part of EPAM CloudX Associate Final Task */
 
