@@ -13,6 +13,8 @@ using Microsoft.eShopWeb.ApplicationCore.Entities.OrderAggregate;
 using Microsoft.eShopWeb.ApplicationCore.Interfaces;
 using Microsoft.eShopWeb.ApplicationCore.Specifications;
 using Newtonsoft.Json;
+using Azure.Messaging.ServiceBus;
+using System;
 
 namespace Microsoft.eShopWeb.ApplicationCore.Services;
 
@@ -23,15 +25,31 @@ public class OrderService : IOrderService
     private readonly IRepository<Basket> _basketRepository;
     private readonly IRepository<CatalogItem> _itemRepository;
 
+    private readonly string _serviceBusConnectionString;
+    private readonly string _serviceBusQueueName;
+    private readonly string _deliveryOrderProcessorUrl;
+    private ServiceBusClient serviceBusclient;
+    private ServiceBusSender serviceBusSender;
+    private readonly IAppLogger<OrderService> _logger;
+
     public OrderService(IRepository<Basket> basketRepository,
         IRepository<CatalogItem> itemRepository,
         IRepository<Order> orderRepository,
-        IUriComposer uriComposer)
+        IUriComposer uriComposer,
+        string serviceBusConnectionString,
+        string serviceBusQueueName,
+        string deliveryOrderProcessorUrl,
+        IAppLogger<OrderService> logger)
     {
         _orderRepository = orderRepository;
         _uriComposer = uriComposer;
         _basketRepository = basketRepository;
         _itemRepository = itemRepository;
+
+        _serviceBusConnectionString = serviceBusConnectionString;
+        _serviceBusQueueName = serviceBusQueueName;
+        _deliveryOrderProcessorUrl = deliveryOrderProcessorUrl;
+        _logger = logger;
     }
 
     public async Task CreateOrderAsync(int basketId, Address shippingAddress)
@@ -55,27 +73,72 @@ public class OrderService : IOrderService
 
         var order = new Order(basket.BuyerId, shippingAddress, items);
         await _orderRepository.AddAsync(order);
-        await DeliberyOrderProcessor(order);
+
+        _ = SendOrderDetailsToServiceBusQueue(order);
+        _ = DeliveryOrderProcessor(order);
     }
 
-    private async Task DeliberyOrderProcessor(Order order)
+    private async Task SendOrderDetailsToServiceBusQueue(Order order)
     {
-        var Url = "https://epamdeliveryorderprocessor.azurewebsites.net/api/DeliveryOrderProcessor?orderId=" + order.Id;
+        OrderReserver orderedItems = new OrderReserver()
+        {
+            OrderId = order.Id,
+            OrderedItems = order.OrderItems.Select(p => new OrderedItem()
+            {
+                ProductId = p.ItemOrdered.CatalogItemId,
+                ProductQuantity = p.Units,
+                ProductName = p.ItemOrdered.ProductName
+            }).ToList()
+
+        };
+
+        string orderReserverDetails = JsonConvert.SerializeObject(orderedItems);
+        try
+        {
+            serviceBusclient = new ServiceBusClient(_serviceBusConnectionString);
+            serviceBusSender = serviceBusclient.CreateSender(_serviceBusQueueName);
+            using (ServiceBusMessageBatch messageBatch = await serviceBusSender.CreateMessageBatchAsync())
+            {
+                var serviceBusMessage = new ServiceBusMessage($"{orderReserverDetails}")
+                {
+                    ContentType = "application/json",
+                };
+
+                if (!messageBatch.TryAddMessage(serviceBusMessage))
+                {
+                    throw new Exception($"Order failed to store in Service Bus queue. OrderDetails {orderReserverDetails}");
+                }
+                await serviceBusSender.SendMessagesAsync(messageBatch);
+            }
+        }
+        catch (Exception)
+        {
+            throw;
+        }
+        finally
+        {
+            await serviceBusSender.DisposeAsync();
+            await serviceBusclient.DisposeAsync();
+        }
+    }
+
+    private async Task DeliveryOrderProcessor(Order order)
+    {
+        var Url = $"{_deliveryOrderProcessorUrl}?orderId={order.Id}";
         dynamic content = new { data = order };
 
-        
+
         using (var client = new HttpClient())
         using (var request = new HttpRequestMessage(HttpMethod.Post, Url))
         using (var httpContent = CreateHttpContent(content))
         {
             request.Content = httpContent;
-
             using (var response = await client
                 .SendAsync(request, HttpCompletionOption.ResponseHeadersRead)
                 .ConfigureAwait(false))
             {
-
                 string responseFromFunction = await response.Content.ReadAsStringAsync();
+                _logger.LogInformation($"Response from DeliveryOrderProcessor: {responseFromFunction}");
             }
         }
     }
